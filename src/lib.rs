@@ -3,6 +3,8 @@
 // but some rules are too "annoying" or are not applicable for your case.)
 #![allow(clippy::wildcard_imports)]
 
+use std::str::FromStr;
+
 use seed::{prelude::*, *};
 
 use base::{Header, Footer};
@@ -29,10 +31,62 @@ fn init(_: Url, _: &mut impl Orders<Msg>) -> Model {
 // it might make sense to group them under a custom struct so we can codify their linkage
 #[derive(Default)]
 struct Model {
-    start: u32,
-    start_buffer: String,
-    end: u32,
-    end_buffer: String,
+    start: TextBuffer<u32>,
+    end: TextBuffer<u32>,
+}
+
+/// Stores a raw text value and the parsed result
+#[derive(Default)]
+struct TextBuffer<T: FromStr> {
+    pub raw: String,
+    pub parsed: T,
+}
+
+/// parsing the raw text value may depend on external information
+/// this additional validation logic is parsed in as a closure
+/// which will need to capture from its calling environment if needed
+impl<T: FromStr + std::cmp::PartialEq + std::fmt::Display> TextBuffer<T> {
+    /// update the raw value, this method could easily have been named set_raw
+    pub fn update(&mut self, raw: String) {
+        self.raw = raw;
+    }
+
+    /// overwrite both the parsed and raw values by providing a ready parsed value
+    /// which is converted to a string
+    pub fn overwrite(&mut self, parsed: T) {
+        self.raw = parsed.to_string();
+        self.parsed = parsed;
+    }
+
+    /// parse the current raw value and store it
+    pub fn parse(&mut self) {
+        if let Ok(parsed) = self.raw.parse() {
+            self.parsed = parsed;
+        }
+    }
+
+    /// parse the current raw value and then store the result of it going through a given
+    /// validation function the provided closure takes a reference to the (successfully) parsed
+    /// value and should return Some(T) to store T or None to make no changes
+    pub fn validate<F>(&mut self, validate: F)
+    where
+        F: Fn(&T) -> Option<T>
+    {
+        if let Ok(parsed) = self.raw.parse() {
+            if let Some(valid) = validate(&parsed) {
+                self.parsed = valid;
+            }
+        }
+    }
+
+    /// returns true if the parsed value and raw value currently match
+    pub fn is_valid(&self) -> bool {
+        if let Ok(parsed) = self.raw.parse() {
+            self.parsed == parsed
+        } else {
+            false
+        }
+    }
 }
 
 // ------ ------
@@ -51,44 +105,46 @@ enum Msg {
 fn update(msg: Msg, model: &mut Model, _: &mut impl Orders<Msg>) {
     match msg {
         Msg::UpdateStart(raw) => {
-            if let Ok(start) = raw.parse::<u32>() {
-                if start >= model.end {
-                    model.start = std::cmp::min(start, 99);
-                }
-            } else {
-                model.start = model.end;
-            }
-            model.start_buffer = raw;
+            // update the raw value
+            model.start.update(raw);
+            // check both start and end if their raw values have become valid (their validity is inter-dependent)
+            // note the order is significant here:
+            //   * update start first because it has just changed, by checking against the existing end value
+            //   * then with a new start value we should check if start is now valid
+            let prev_end = model.end.parsed;
+            model.start.validate(|start| if start >= &prev_end { Some(std::cmp::min(*start, 99)) } else { None });
+            let new_start = model.start.parsed;
+            model.end.validate(|end| if end <= &new_start { Some(std::cmp::min(*end, 99)) } else { None });
         },
         Msg::UpdateEnd(raw) => {
-            if let Ok(end) = raw.parse::<u32>() {
-                if end <= model.start {
-                    model.end = std::cmp::min(end, 99);
-                }
-            } else {
-                model.end = model.start;
-            }
-            model.end_buffer = raw;
+            // update the raw value
+            model.end.update(raw);
+
+            // check both start and end if their raw values have become valid (their validity is inter-dependent)
+            // note the order is significant here:
+            //   * update end first because it has just changed, by checking against the existing start value
+            //   * then with a new end value we should check if start is now valid
+            let prev_start = model.start.parsed;
+            model.end.validate(|end| if end <= &prev_start { Some(std::cmp::min(*end, 99)) } else { None });
+            let new_end = model.end.parsed;
+            model.start.validate(|start| if start >= &new_end { Some(std::cmp::min(*start, 99)) } else { None });
         },
         Msg::FullSong => {
-            model.start = 99;
-            model.end = 0;
-            model.start_buffer = model.start.to_string();
-            model.end_buffer = model.end.to_string();
+            model.start.overwrite(99);
+            model.end.overwrite(0);
         },
         Msg::NextVerse => {
-            match model.end {
+            match model.end.parsed {
                 0 => {
-                    model.start = 99;
-                    model.end = 99;
+                    model.start.overwrite(99);
+                    model.end.overwrite(99);
                 },
                 x => {
-                    model.end = x - 1;
+                    model.end.overwrite(x - 1);
                 }
             };
-            model.start_buffer = model.start.to_string();
-            model.end_buffer = model.end.to_string();
         },
+
     }
 }
 
@@ -108,12 +164,12 @@ fn view(model: &Model) -> Vec<Node<Msg>> {
                 C!["flexbox-row"],
                 input![
                     C!["from"],
-                    attrs!{ At::Type => "number", At::Value => model.start_buffer },
+                    attrs!{ At::Type => "number", At::Value => model.start.raw },
                     input_ev(Ev::Input, Msg::UpdateStart)
                 ],
                 input![
                     C!["to"],
-                    attrs!{ At::Type => "number", At::Value => model.end_buffer },
+                    attrs!{ At::Type => "number", At::Value => model.end.raw },
                     input_ev(Ev::Input, Msg::UpdateEnd)
                 ]
             ],
@@ -132,7 +188,7 @@ fn view(model: &Model) -> Vec<Node<Msg>> {
             ],
             ul![
                 C!["song"],
-                sing(model.start, model.end).lines().map(|verse| li![verse]).collect::<Vec<Node<Msg>>>()
+                sing(model.start.parsed, model.end.parsed).lines().map(|verse| li![verse]).collect::<Vec<Node<Msg>>>()
             ],
         ]
         Footer::new("Beer Song", "Choose a range of verses of \"the beer song\" to 'sing'"),
