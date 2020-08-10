@@ -17,5 +17,6 @@
   ],
   "module": "package.js",
   "types": "package.d.ts",
-  "sideEffects": false
+  "sideEffects": false,
+  "homepage" : "http://drmason13.github.io/exercism-rust-beer-song-gui"
 }
